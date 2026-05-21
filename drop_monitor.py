@@ -1,7 +1,7 @@
+import os
 import requests
 import time
 import json
-import os
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode
 
@@ -11,76 +11,63 @@ from urllib.parse import urlencode
 
 STORE = "https://www.rev.co.th"
 TZ = timezone(timedelta(hours=7))
-DROP_TIME = datetime(2025, 1, 16, 10, 0, 0, tzinfo=TZ)
+
+# ⚠️ UPDATE THIS TO THE REAL DATE
+DROP_TIME = datetime(2025, 7, 15, 10, 0, 0, tzinfo=TZ)
 
 REQUIRED_KEYWORDS = ["endorphin", "minted"]
 PREFERRED_SIZE = "US 10"
 
-# ── Telegram ──
-TG_TOKEN   = os.environ.get("TG_TOKEN")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
+TG_TOKEN   = os.environ.get("TG_TOKEN", "")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
 PROFILE = {
-    "email":       "youremail@gmail.com",
-    "first_name":  "John",
-    "last_name":   "Doe",
-    "address1":    "123 Sukhumvit Road",
-    "address2":    "Condo 55/12",
-    "city":        "Bangkok",
-    "province":    "Bangkok",
-    "zip":         "10110",
-    "country":     "TH",
-    "phone":       "0812345678",
+    "email":       os.environ.get("EMAIL", ""),
+    "first_name":  os.environ.get("FIRST_NAME", ""),
+    "last_name":   os.environ.get("LAST_NAME", ""),
+    "address1":    os.environ.get("ADDRESS1", ""),
+    "address2":    os.environ.get("ADDRESS2", ""),
+    "city":        os.environ.get("CITY", ""),
+    "province":    os.environ.get("PROVINCE", ""),
+    "zip":         os.environ.get("ZIP", ""),
+    "country":     os.environ.get("COUNTRY", "TH"),
+    "phone":       os.environ.get("PHONE", ""),
 }
 
 
 # ═══════════════════════════════════════════
-#  TELEGRAM ALERTS
+#  HELPERS
 # ═══════════════════════════════════════════
 
-def tg_send(text, parse_mode="HTML"):
-    """Send a Telegram message. Returns True if OK."""
+def now_gmt7():
+    return datetime.now(TZ)
+
+
+def tg_send(text):
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data={
-                "chat_id": TG_CHAT_ID,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": False,
-            },
+            data={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
             timeout=5,
         )
         return resp.status_code == 200
     except Exception as e:
-        print(f"[!] Telegram send failed: {e}")
+        print(f"[!] TG error: {e}")
         return False
 
 
 def tg_alert_checkout(product_title, checkout_url, variant_info):
-    """Rich alert when product is carted."""
-    text = (
-        f"🎯 <b>TARGET FOUND & IN CART!</b>\n\n"
-        f"📦 <b>{product_title}</b>\n"
+    tg_send(
+        f"🎯 <b>IN CART!</b>\n\n"
+        f"📦 {product_title}\n"
         f"👟 {variant_info}\n\n"
-        f"👉 <a href=\"{checkout_url}\">OPEN CHECKOUT NOW</a>\n\n"
-        f"⚡ Address is prefilled — just select payment!"
+        f"👉 <a href=\"{checkout_url}\">OPEN CHECKOUT</a>\n\n"
+        f"⚡ Address prefilled — just pay!"
     )
-    tg_send(text)
-
-
-def tg_alert_status(message):
-    """Status updates (less urgent)."""
-    tg_send(f"ℹ️ {message}")
-
-
-def tg_alert_error(message):
-    """Error alerts."""
-    tg_send(f"🚨 {message}")
 
 
 # ═══════════════════════════════════════════
-#  SHOPPIFY SESSION
+#  SESSION
 # ═══════════════════════════════════════════
 
 session = requests.Session()
@@ -95,10 +82,6 @@ session.headers.update({
 
 etag = None
 last_modified = None
-
-
-def now_gmt7():
-    return datetime.now(TZ)
 
 
 # ═══════════════════════════════════════════
@@ -125,10 +108,11 @@ def get_schedule():
 
 
 # ═══════════════════════════════════════════
-#  FETCH + MONITOR
+#  FETCH (with proper error handling)
 # ═══════════════════════════════════════════
 
 def fetch_products():
+    """Fetch products with conditional GET. Returns (status, data)."""
     global etag, last_modified
 
     url = f"{STORE}/products.json?limit=10&page=1"
@@ -138,14 +122,30 @@ def fetch_products():
     if last_modified:
         headers["If-Modified-Since"] = last_modified
 
-    resp = session.get(url, headers=headers, timeout=10)
+    try:
+        resp = session.get(url, headers=headers, timeout=10)
+    except Exception as e:
+        return "error", str(e)
 
     if "ETag" in resp.headers:
         etag = resp.headers["ETag"]
     if "Last-Modified" in resp.headers:
         last_modified = resp.headers["Last-Modified"]
 
-    return resp
+    if resp.status_code == 304:
+        return "not_modified", None
+
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+            return "ok", data
+        except Exception:
+            # Not JSON — print what we actually got
+            preview = resp.text[:200]
+            print(f"  [!] Not JSON! Response: {preview}")
+            return "bad_json", preview
+
+    return "http_error", resp.status_code
 
 
 def is_target(product):
@@ -159,7 +159,7 @@ def is_target(product):
 
 
 # ═══════════════════════════════════════════
-#  ATC + CHECKOUT URL
+#  ATC + CHECKOUT
 # ═══════════════════════════════════════════
 
 def pick_variant(product):
@@ -176,15 +176,14 @@ def pick_variant(product):
 def add_to_cart(variant_id):
     url = f"{STORE}/cart/add.js"
     data = {"form_type": "product", "id": str(variant_id), "quantity": "1"}
-
     for attempt in range(3):
         try:
             resp = session.post(url, data=data, timeout=5)
             if resp.status_code == 200:
                 return True
-            print(f"    ATC attempt {attempt+1}: {resp.status_code}")
+            print(f"    ATC #{attempt+1}: {resp.status_code}")
         except Exception as e:
-            print(f"    ATC attempt {attempt+1}: {e}")
+            print(f"    ATC #{attempt+1}: {e}")
         time.sleep(0.2)
     return False
 
@@ -217,110 +216,116 @@ def main():
     print(f"  Drop:    {DROP_TIME.strftime('%Y-%m-%d %H:%M:%S')} GMT+7")
     print("═" * 58)
 
-    # ── Test Telegram ──
-    print("[*] Testing Telegram...")
-    if tg_send("🤖 Bot started! Monitoring rev.co.th"):
-        print("[✓] Telegram connected")
-    else:
-        print("[✗] Telegram failed — check token & chat_id")
-        print("    Continuing anyway...")
+    tg_send("🤖 Bot started!")
 
-    # ── Clock ──
     sec_until = (DROP_TIME - now_gmt7()).total_seconds()
-    print(f"  Now:     {now_gmt7().strftime('%H:%M:%S')} GMT+7")
+    print(f"  Now:     {now_gmt7().strftime('%Y-%m-%d %H:%M:%S')} GMT+7")
     print(f"  Until:   {sec_until:.0f}s ({sec_until/60:.1f} min)\n")
 
-    # ── Seed ──
-    print("[*] Seeding known products...")
-    resp = fetch_products()
-    if resp.status_code == 200:
-        known_handles = {p["handle"] for p in resp.json().get("products", [])}
-        print(f"    {len(known_handles)} products known:")
+    # ── Diagnostic: test the URL right now ──
+    print("[*] Testing products.json endpoint...")
+    status, data = fetch_products()
+
+    if status == "ok":
+        products = data.get("products", [])
+        known_handles = {p["handle"] for p in products}
+        print(f"  [✓] Got {len(products)} products:")
         for h in sorted(known_handles):
             print(f"      • {h}")
-    else:
+    elif status == "not_modified":
         known_handles = set()
-        print(f"    ⚠ Seed failed: {resp.status_code}")
+        print(f"  [✓] 304 (cached, normal)")
+    elif status == "bad_json":
+        print(f"  [✗] Site returned HTML, not JSON!")
+        print(f"  [!] This might mean:")
+        print(f"      - Site has a password page")
+        print(f"      - /products.json is blocked")
+        print(f"      - Site is not Shopify")
+        print(f"  [!] Response: {data[:200]}")
+        tg_send(f"⚠️ Site not returning JSON! Response:\n{data[:200]}")
+        known_handles = set()
+    else:
+        print(f"  [✗] Error: {status} — {data}")
+        tg_send(f"⚠️ Connection error: {status}")
+        known_handles = set()
+
     print()
 
-    # ── Poll ──
+    # ── Polling loop ──
     check_count = 0
 
     while True:
-        action, interval, mode = get_schedule()
+        try:
+            action, interval, mode = get_schedule()
 
-        if action is None:
-            left = (DROP_TIME - now_gmt7()).total_seconds() / 60
-            print(f"  💤 {left:.0f} min to go. Sleeping {interval}s...")
-            time.sleep(interval)
-            continue
+            if action is None:
+                left = (DROP_TIME - now_gmt7()).total_seconds() / 60
+                print(f"  💤 {left:.0f} min to go. Sleeping {interval}s...")
+                time.sleep(interval)
+                continue
 
-        check_count += 1
-        now_str = now_gmt7().strftime("%H:%M:%S")
-        sec_left = (DROP_TIME - now_gmt7()).total_seconds()
+            check_count += 1
+            now_str = now_gmt7().strftime("%H:%M:%S")
+            sec_left = (DROP_TIME - now_gmt7()).total_seconds()
 
-        resp = fetch_products()
+            status, data = fetch_products()
 
-        if resp.status_code == 304:
-            print(f"  [{now_str}] #{check_count:>4}  304  "
-                  f"({mode})  [{sec_left:+.0f}s]")
-
-        elif resp.status_code == 200:
-            products = resp.json().get("products", [])
-            current_handles = {p["handle"] for p in products}
-            new_handles = current_handles - known_handles
-
-            if new_handles:
-                print(f"\n  🔄 NEW: {new_handles}")
-
-                for p in products:
-                    if p["handle"] not in new_handles:
-                        continue
-
-                    if is_target(p):
-                        variant = pick_variant(p)
-                        variant_info = (f"{variant['title']} — "
-                                       f"฿{variant['price']}")
-
-                        print(f"\n  {'='*55}")
-                        print(f"  🎯 TARGET: {p['title']}")
-                        print(f"  {variant_info}")
-                        print(f"  {'='*55}")
-
-                        print(f"  → Adding to cart...")
-                        if add_to_cart(variant["id"]):
-                            checkout_url = build_checkout_url()
-
-                            # ── SEND TO TELEGRAM ──
-                            print(f"  ✅ IN CART — sending Telegram alert...")
-                            tg_alert_checkout(
-                                product_title=p["title"],
-                                checkout_url=checkout_url,
-                                variant_info=variant_info,
-                            )
-                            print(f"  ✅ Telegram sent!")
-                            print(f"  ✅ Check your phone NOW!\n")
-                            return
-
-                        else:
-                            tg_alert_error(
-                                f"Found {p['title']} but ATC failed!"
-                            )
-                            return
-                    else:
-                        print(f"    (new but not target: {p['title']})")
-
-                known_handles = current_handles
-            else:
-                print(f"  [{now_str}] #{check_count:>4}  200  "
+            if status == "not_modified":
+                print(f"  [{now_str}] #{check_count:>4}  304  "
                       f"({mode})  [{sec_left:+.0f}s]")
-                known_handles = current_handles
 
-        else:
-            print(f"  [{now_str}] #{check_count:>4}  ⚠ {resp.status_code}  "
-                  f"({mode})  [{sec_left:+.0f}s]")
+            elif status == "ok":
+                products = data.get("products", [])
+                current_handles = {p["handle"] for p in products}
+                new_handles = current_handles - known_handles
 
-        time.sleep(interval)
+                if new_handles:
+                    print(f"\n  🔄 NEW: {new_handles}")
+
+                    for p in products:
+                        if p["handle"] not in new_handles:
+                            continue
+
+                        if is_target(p):
+                            variant = pick_variant(p)
+                            info = f"{variant['title']} — ฿{variant['price']}"
+
+                            print(f"\n  {'='*55}")
+                            print(f"  🎯 TARGET: {p['title']}")
+                            print(f"  {info}")
+                            print(f"  {'='*55}")
+
+                            print(f"  → Adding to cart...")
+                            if add_to_cart(variant["id"]):
+                                checkout_url = build_checkout_url()
+                                tg_alert_checkout(p["title"], checkout_url, info)
+                                print(f"  ✅ Done! Check Telegram.\n")
+                                return
+                            else:
+                                tg_send(f"🚨 Found {p['title']} — ATC FAILED!")
+                                return
+                        else:
+                            print(f"    (not target: {p['title']})")
+
+                    known_handles = current_handles
+                else:
+                    print(f"  [{now_str}] #{check_count:>4}  200  "
+                          f"({mode})  [{sec_left:+.0f}s]")
+                    known_handles = current_handles
+
+            elif status == "bad_json":
+                print(f"  [{now_str}] #{check_count:>4}  BAD JSON  "
+                      f"({mode})  [{sec_left:+.0f}s]")
+
+            else:
+                print(f"  [{now_str}] #{check_count:>4}  {status}  "
+                      f"({mode})  [{sec_left:+.0f}s]")
+
+            time.sleep(interval)
+
+        except Exception as e:
+            print(f"  [!] Loop error: {e}")
+            time.sleep(5)
 
 
 if __name__ == "__main__":

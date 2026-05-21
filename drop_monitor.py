@@ -16,8 +16,8 @@ REQUIRED_KEYWORDS = ["endorphin", "minted"]
 PREFERRED_SIZE = "US 10"
 
 # ── Telegram ──
-TG_TOKEN   = "7123456789:AAHk8dJfGh2Kl_mN9oPqR_sTuVwXyZ"  # ← paste yours
-TG_CHAT_ID = "123456789"                                     # ← paste yours
+TG_TOKEN   = os.environ.get("TG_TOKEN")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
 PROFILE = {
     "email":       "youremail@gmail.com",

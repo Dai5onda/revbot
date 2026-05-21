@@ -13,7 +13,7 @@ STORE = "https://www.rev.co.th"
 TZ = timezone(timedelta(hours=7))
 
 # ⚠️ UPDATE THIS TO THE REAL DATE
-DROP_TIME = datetime(2025, 7, 15, 10, 0, 0, tzinfo=TZ)
+DROP_TIME = datetime(2026, 5, 22, 10, 0, 0, tzinfo=TZ)
 
 REQUIRED_KEYWORDS = ["endorphin", "minted"]
 PREFERRED_SIZE = "US 10"
